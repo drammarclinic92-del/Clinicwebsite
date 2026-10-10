@@ -1,1 +1,0 @@
-ارفع index.html ومجلد images إلى مستودع GitHub، ثم Settings > Pages > Deploy from branch > main > /(root) > Save.
