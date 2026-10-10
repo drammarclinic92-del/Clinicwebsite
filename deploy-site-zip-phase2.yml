@@ -1,0 +1,96 @@
+name: Deploy ASNA-CA Website ZIP to GitHub Pages
+
+on:
+  workflow_dispatch:
+    inputs:
+      zip_file:
+        description: 'ZIP file uploaded to the repository root'
+        required: true
+        default: 'ASNA-CA_Commercial_Platform_Phase2.zip'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: deploy-asna-ca-website
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          persist-credentials: true
+
+      - name: Validate ZIP
+        shell: bash
+        env:
+          ZIP_FILE: ${{ inputs.zip_file }}
+        run: |
+          set -euo pipefail
+          if [[ ! -f "$ZIP_FILE" ]]; then
+            echo "::error::ZIP not found in repository root: $ZIP_FILE"
+            echo "Upload the website ZIP to the repository root first."
+            exit 1
+          fi
+          unzip -t "$ZIP_FILE"
+
+      - name: Extract and install website files
+        shell: bash
+        env:
+          ZIP_FILE: ${{ inputs.zip_file }}
+        run: |
+          set -euo pipefail
+          TMP_DIR="$(mktemp -d)"
+          unzip -q "$ZIP_FILE" -d "$TMP_DIR"
+
+          # Support either a ZIP with files at its root or one enclosing folder.
+          if [[ -f "$TMP_DIR/index.html" ]]; then
+            SOURCE_DIR="$TMP_DIR"
+          else
+            mapfile -t INDEX_FILES < <(find "$TMP_DIR" -mindepth 2 -maxdepth 4 -type f -name index.html)
+            if [[ "${#INDEX_FILES[@]}" -ne 1 ]]; then
+              echo "::error::Expected exactly one index.html in the uploaded ZIP."
+              find "$TMP_DIR" -maxdepth 4 -type f | sort
+              exit 1
+            fi
+            SOURCE_DIR="$(dirname "${INDEX_FILES[0]}")"
+          fi
+
+          for REQUIRED in index.html reminder.html clinic-management.html assets/styles.css assets/script.js assets/asna-ca-logo.png; do
+            if [[ ! -f "$SOURCE_DIR/$REQUIRED" ]]; then
+              echo "::error::Missing required file in ZIP: $REQUIRED"
+              exit 1
+            fi
+          done
+
+          # Replace only website files owned by this workflow; keep clinic images and other repo files.
+          rm -f index.html reminder.html clinic-management.html
+          mkdir -p assets
+          cp "$SOURCE_DIR/index.html" .
+          cp "$SOURCE_DIR/reminder.html" .
+          cp "$SOURCE_DIR/clinic-management.html" .
+          cp -R "$SOURCE_DIR/assets/." ./assets/
+
+          test -s index.html
+          test -s reminder.html
+          test -s clinic-management.html
+          test -s assets/styles.css
+          test -s assets/asna-ca-logo.png
+
+      - name: Commit website update
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.html reminder.html clinic-management.html assets/
+          if git diff --cached --quiet; then
+            echo "No website changes to commit."
+            exit 0
+          fi
+          git commit -m "Deploy ASNA-CA website Phase 2"
+          git push origin HEAD:main
