@@ -1,71 +1,107 @@
 name: Deploy ASNA-CA Website ZIP to GitHub Pages
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - "ASNA-CA_Commercial_Platform_Phase2.zip"
+      - ".github/workflows/deploy-site-zip-phase2.yml"
+
   workflow_dispatch:
     inputs:
       zip_file:
-        description: "ZIP file uploaded to the repository root"
+        description: "Website ZIP filename in repository root"
         required: true
         default: "ASNA-CA_Commercial_Platform_Phase2.zip"
+        type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: deploy-asna-ca-website
+  group: asna-ca-website-deployment
   cancel-in-progress: false
 
 jobs:
   deploy:
-    name: Install website files
+    name: Extract and publish website files
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout main
+      - name: Checkout repository
         uses: actions/checkout@v4
         with:
           ref: main
-          persist-credentials: true
+          fetch-depth: 0
 
-      - name: Check uploaded website ZIP
+      - name: Select ZIP filename
+        id: zip
         shell: bash
         env:
-          ZIP_FILE: ${{ inputs.zip_file }}
+          MANUAL_ZIP: ${{ inputs.zip_file }}
         run: |
           set -euo pipefail
-          if [[ ! -f "$ZIP_FILE" ]]; then
-            echo "::error::Website ZIP was not found: $ZIP_FILE"
+
+          ZIP_FILE="${MANUAL_ZIP:-ASNA-CA_Commercial_Platform_Phase2.zip}"
+
+          if [[ "$ZIP_FILE" == */* || "$ZIP_FILE" == *".."* ]]; then
+            echo "::error::Enter only the ZIP filename, not a path."
             exit 1
           fi
-          unzip -t "$ZIP_FILE"
 
-      - name: Extract and validate website
+          echo "file=$ZIP_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Verify ZIP exists and is valid
         shell: bash
         env:
-          ZIP_FILE: ${{ inputs.zip_file }}
+          ZIP_FILE: ${{ steps.zip.outputs.file }}
         run: |
           set -euo pipefail
-          TMP_DIR="$(mktemp -d)"
-          unzip -q "$ZIP_FILE" -d "$TMP_DIR"
 
-          if [[ -f "$TMP_DIR/index.html" ]]; then
-            SOURCE_DIR="$TMP_DIR"
-          else
-            mapfile -t INDEX_FILES < <(
-              find "$TMP_DIR" -mindepth 2 -maxdepth 5 \
-                -type f -name index.html
-            )
-
-            if [[ "${#INDEX_FILES[@]}" -ne 1 ]]; then
-              echo "::error::Could not identify the website root."
-              find "$TMP_DIR" -maxdepth 5 -type f | sort
-              exit 1
-            fi
-
-            SOURCE_DIR="$(dirname "${INDEX_FILES[0]}")"
+          if [[ ! -s "$ZIP_FILE" ]]; then
+            echo "::error::ZIP file missing or empty: $ZIP_FILE"
+            echo "Files in repository root:"
+            ls -la
+            exit 1
           fi
 
-          for REQUIRED in \
+          echo "Checking ZIP archive..."
+          unzip -t "$ZIP_FILE"
+
+          echo "ZIP contents:"
+          unzip -Z1 "$ZIP_FILE" | head -n 100
+
+      - name: Extract website ZIP
+        shell: bash
+        env:
+          ZIP_FILE: ${{ steps.zip.outputs.file }}
+        run: |
+          set -euo pipefail
+
+          TMP_DIR="$RUNNER_TEMP/asna-ca-website"
+          mkdir -p "$TMP_DIR"
+
+          unzip -q "$ZIP_FILE" -d "$TMP_DIR"
+
+          echo "Looking for index.html..."
+
+          mapfile -t INDEX_FILES < <(
+            find "$TMP_DIR" -type f -name index.html
+          )
+
+          if [[ "${#INDEX_FILES[@]}" -ne 1 ]]; then
+            echo "::error::Expected exactly one index.html."
+            echo "Found ${#INDEX_FILES[@]} index.html files."
+            find "$TMP_DIR" -maxdepth 5 -type f | sort
+            exit 1
+          fi
+
+          SOURCE_DIR="$(dirname "${INDEX_FILES[0]}")"
+
+          echo "Website source: $SOURCE_DIR"
+
+          for FILE in \
             index.html \
             reminder.html \
             clinic-management.html \
@@ -73,18 +109,21 @@ jobs:
             assets/script.js \
             assets/asna-ca-logo.png
           do
-            if [[ ! -s "$SOURCE_DIR/$REQUIRED" ]]; then
-              echo "::error::Missing required file: $REQUIRED"
+            if [[ ! -s "$SOURCE_DIR/$FILE" ]]; then
+              echo "::error::Required file missing: $FILE"
+              echo "Extracted files:"
+              find "$TMP_DIR" -maxdepth 5 -type f | sort
               exit 1
             fi
           done
 
           echo "$SOURCE_DIR" > "$RUNNER_TEMP/asna-ca-source-dir.txt"
 
-      - name: Install website files
+      - name: Copy website into repository root
         shell: bash
         run: |
           set -euo pipefail
+
           SOURCE_DIR="$(cat "$RUNNER_TEMP/asna-ca-source-dir.txt")"
 
           cp "$SOURCE_DIR/index.html" ./index.html
@@ -94,6 +133,15 @@ jobs:
           mkdir -p assets
           cp -R "$SOURCE_DIR/assets/." ./assets/
 
+          echo "Website files installed:"
+          ls -la index.html reminder.html clinic-management.html
+          find assets -maxdepth 2 -type f | sort
+
+      - name: Validate installed website
+        shell: bash
+        run: |
+          set -euo pipefail
+
           test -s index.html
           test -s reminder.html
           test -s clinic-management.html
@@ -101,7 +149,9 @@ jobs:
           test -s assets/script.js
           test -s assets/asna-ca-logo.png
 
-      - name: Commit and push website files
+          echo "All required website files are present."
+
+      - name: Commit website files to main
         shell: bash
         run: |
           set -euo pipefail
@@ -114,13 +164,13 @@ jobs:
 
           if git diff --cached --quiet; then
             echo "Website files are already up to date."
-            exit 0
+          else
+            git commit -m "Deploy ASNA-CA website"
+            git push origin HEAD:main
           fi
 
-          git commit -m "Deploy ASNA-CA website Phase 2"
-          git push origin HEAD:main
-
-      - name: Deployment handoff
+      - name: Deployment summary
         run: |
-          echo "Website files have been committed to main."
-          echo "Check GitHub Pages deployment for the published website."
+          echo "Website files are ready in the repository root."
+          echo "Expected homepage: index.html"
+          echo "Next, check the GitHub Pages deployment."
